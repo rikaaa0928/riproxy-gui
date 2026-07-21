@@ -4,7 +4,7 @@ use crate::backend::{
 use crate::config::{self, AppConfig, Profile};
 use crate::observe::{ObserveState, format_bps, format_bytes, format_uptime};
 use crate::platform::{self, TrayAction, TrayHandle};
-use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, Vec2};
 use egui_extras::{Column, TableBuilder};
 use std::collections::VecDeque;
 use std::fs;
@@ -27,6 +27,7 @@ pub struct ProxyGuiApp {
     observe: ObserveState,
     config_editor: ConfigEditor,
     new_profile_name: String,
+    app_icon: TextureHandle,
     active_profile_name: Option<String>,
     pending_restart_profile_name: Option<String>,
     tray: Option<TrayHandle>,
@@ -54,6 +55,7 @@ impl ProxyGuiApp {
         if start_minimized {
             config.run_in_tray = true;
         }
+        let app_icon = load_app_icon_texture(&cc.egui_ctx);
         let active_profile_name = config.active_profile.clone();
         let mut app = Self {
             config,
@@ -62,6 +64,7 @@ impl ProxyGuiApp {
             observe: ObserveState::new(),
             config_editor: ConfigEditor::default(),
             new_profile_name: String::new(),
+            app_icon,
             active_profile_name,
             pending_restart_profile_name: None,
             tray: None,
@@ -498,7 +501,10 @@ impl ProxyGuiApp {
 
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("RiProxy");
+            ui.add(egui::Image::new((
+                self.app_icon.id(),
+                Vec2::new(32.0, 32.0),
+            )));
             ui.separator();
 
             let selected_name = self
@@ -1140,6 +1146,16 @@ fn setup_style(ctx: &egui::Context) {
         style.visuals.widgets.active.corner_radius = 4.0.into();
         ctx.set_style_of(theme, style);
     }
+}
+
+fn load_app_icon_texture(ctx: &egui::Context) -> TextureHandle {
+    let icon = eframe::icon_data::from_png_bytes(platform::app_icon_bytes())
+        .expect("embedded app icon should be a valid png");
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    ctx.load_texture("app-icon", image, egui::TextureOptions::LINEAR)
 }
 
 fn nav_button(ui: &mut egui::Ui, current: &mut View, target: View, label: &str) {

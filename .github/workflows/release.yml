@@ -64,8 +64,8 @@ jobs:
       - name: Build
         run: cargo build --release --locked --no-default-features --features ${{ matrix.backend.features }}
 
-      - name: Package Unix
-        if: runner.os != 'Windows'
+      - name: Package Linux
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -73,6 +73,18 @@ jobs:
           name="riproxy-gui-${version}-${{ matrix.platform }}-${{ matrix.backend.name }}"
           mkdir -p "dist/${name}"
           cp "target/release/${{ matrix.binary }}" "dist/${name}/"
+          cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          name="riproxy-gui-${version}-${{ matrix.platform }}-${{ matrix.backend.name }}"
+          mkdir -p "dist/${name}"
+          bash scripts/package-macos-app.sh "target/release/${{ matrix.binary }}" "dist/${name}" "${version}"
           cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
 
