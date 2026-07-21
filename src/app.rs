@@ -27,6 +27,8 @@ pub struct ProxyGuiApp {
     observe: ObserveState,
     config_editor: ConfigEditor,
     new_profile_name: String,
+    active_profile_name: Option<String>,
+    pending_restart_profile_name: Option<String>,
     tray: Option<TrayHandle>,
     tray_error_reported: bool,
     window_visible: bool,
@@ -52,13 +54,16 @@ impl ProxyGuiApp {
         if start_minimized {
             config.run_in_tray = true;
         }
-        Self {
+        let active_profile_name = config.active_profile.clone();
+        let mut app = Self {
             config,
             backend: None,
             backend_kind: None,
             observe: ObserveState::new(),
             config_editor: ConfigEditor::default(),
             new_profile_name: String::new(),
+            active_profile_name,
+            pending_restart_profile_name: None,
             tray: None,
             tray_error_reported: false,
             window_visible: !start_minimized,
@@ -66,11 +71,21 @@ impl ProxyGuiApp {
             view: View::Overview,
             logs: VecDeque::new(),
             last_error: None,
-        }
+        };
+        app.restore_active_profile();
+        app
     }
 
     fn selected_profile(&self) -> Option<&Profile> {
         self.config.profiles.get(self.config.selected_profile)
+    }
+
+    fn profile_index_by_name(&self, name: &str) -> Option<usize> {
+        let name = config::normalize_profile_name(name);
+        self.config
+            .profiles
+            .iter()
+            .position(|profile| profile.name == name)
     }
 
     fn normalize_profile_paths(&mut self) {
@@ -87,6 +102,10 @@ impl ProxyGuiApp {
             .is_some_and(|backend| backend.is_running())
     }
 
+    fn active_backend_kind(&self) -> Option<BackendKind> {
+        self.backend.as_ref().map(|backend| backend.kind())
+    }
+
     fn ensure_backend(&mut self, kind: BackendKind) -> anyhow::Result<()> {
         if self.backend_kind == Some(kind) && self.backend.is_some() {
             return Ok(());
@@ -99,30 +118,49 @@ impl ProxyGuiApp {
         Ok(())
     }
 
-    fn start_selected_profile(&mut self) {
+    fn restore_active_profile(&mut self) {
+        self.normalize_profile_paths();
+        let Some(profile_name) = self.config.active_profile.clone() else {
+            return;
+        };
+        if !self.start_profile_by_name(&profile_name) {
+            self.clear_active_profile();
+        }
+    }
+
+    fn start_profile_by_name(&mut self, profile_name: &str) -> bool {
+        let Some(index) = self.profile_index_by_name(profile_name) else {
+            self.push_error(format!("profile not found: {profile_name}"));
+            return false;
+        };
+        self.config.selected_profile = index;
+        self.start_selected_profile()
+    }
+
+    fn start_selected_profile(&mut self) -> bool {
         self.normalize_selected_profile_path();
         let Some(profile) = self.selected_profile().cloned() else {
             self.push_error("no profile selected");
-            return;
+            return false;
         };
         if self.config_editor.profile_index == Some(self.config.selected_profile)
             && self.config_editor.path == profile.config_path
             && self.config_editor.dirty
         {
             self.push_error("save the edited config file before starting");
-            return;
+            return false;
         }
         if !profile.backend.is_available() {
             self.push_error(format!("{} backend is not enabled", profile.backend));
-            return;
+            return false;
         }
         if let Err(e) = self.ensure_backend(profile.backend) {
             self.push_error(e.to_string());
-            return;
+            return false;
         }
         if let Err(e) = ensure_profile_config_file(&profile) {
             self.push_error(format!("create default config failed: {e}"));
-            return;
+            return false;
         }
 
         let launch = BackendLaunch {
@@ -135,15 +173,50 @@ impl ProxyGuiApp {
             .expect("backend should be initialized")
             .start(launch);
         match result {
-            Ok(()) => self.push_log(format!("{} start requested", profile.backend)),
-            Err(e) => self.push_error(e.to_string()),
+            Ok(()) => {
+                self.set_active_profile(Some(profile.name));
+                self.push_log(format!("{} start requested", profile.backend));
+                true
+            }
+            Err(e) => {
+                self.push_error(e.to_string());
+                false
+            }
         }
     }
 
     fn stop_backend(&mut self) {
+        self.pending_restart_profile_name = None;
         if let Some(backend) = self.backend.as_mut() {
             match backend.stop() {
-                Ok(()) => self.push_log("stop requested"),
+                Ok(()) => {
+                    self.clear_active_profile();
+                    self.push_log("stop requested");
+                }
+                Err(e) => self.push_error(e.to_string()),
+            }
+        }
+    }
+
+    fn restart_active_profile(&mut self) {
+        let Some(profile_name) = self.active_profile_name.clone() else {
+            self.push_error("no active profile to restart");
+            return;
+        };
+
+        if !self.is_running() {
+            if !self.start_profile_by_name(&profile_name) {
+                self.clear_active_profile();
+            }
+            return;
+        }
+
+        if let Some(backend) = self.backend.as_mut() {
+            match backend.stop() {
+                Ok(()) => {
+                    self.pending_restart_profile_name = Some(profile_name);
+                    self.push_log("restart requested");
+                }
                 Err(e) => self.push_error(e.to_string()),
             }
         }
@@ -176,6 +249,14 @@ impl ProxyGuiApp {
                         } else {
                             self.push_log("backend stopped");
                         }
+                        if let Some(profile_name) = self.pending_restart_profile_name.take() {
+                            self.push_log(format!("restarting profile {profile_name}"));
+                            if !self.start_profile_by_name(&profile_name) {
+                                self.clear_active_profile();
+                            }
+                        } else {
+                            self.clear_active_profile();
+                        }
                     }
                 }
             }
@@ -200,6 +281,25 @@ impl ProxyGuiApp {
         match config::save(&self.config) {
             Ok(()) => self.push_log("profiles saved"),
             Err(e) => self.push_error(e.to_string()),
+        }
+    }
+
+    fn save_config_silent(&mut self) {
+        self.normalize_profile_paths();
+        if let Err(e) = config::save(&self.config) {
+            self.push_error(e.to_string());
+        }
+    }
+
+    fn set_active_profile(&mut self, profile_name: Option<String>) {
+        self.active_profile_name = profile_name.clone();
+        self.config.active_profile = profile_name;
+        self.save_config_silent();
+    }
+
+    fn clear_active_profile(&mut self) {
+        if self.active_profile_name.is_some() || self.config.active_profile.is_some() {
+            self.set_active_profile(None);
         }
     }
 
@@ -439,11 +539,20 @@ impl ProxyGuiApp {
             if ui
                 .add_enabled(
                     running,
-                    egui::Button::new("Reload").min_size(Vec2::new(76.0, 28.0)),
+                    egui::Button::new(if self.active_backend_kind() == Some(BackendKind::Rog) {
+                        "Restart"
+                    } else {
+                        "Reload"
+                    })
+                    .min_size(Vec2::new(76.0, 28.0)),
                 )
                 .clicked()
             {
-                self.reload_backend();
+                if self.active_backend_kind() == Some(BackendKind::Rog) {
+                    self.restart_active_profile();
+                } else {
+                    self.reload_backend();
+                }
             }
 
             ui.separator();
@@ -899,6 +1008,10 @@ impl ProxyGuiApp {
                 );
                 ui.end_row();
 
+                ui.label("Active profile");
+                ui.label(self.active_profile_name.as_deref().unwrap_or("-"));
+                ui.end_row();
+
                 ui.label("Observe source");
                 ui.label(if self.observe.overview.is_some() {
                     "embedded"
@@ -1007,6 +1120,10 @@ impl eframe::App for ProxyGuiApp {
     }
 
     fn on_exit(&mut self) {
+        self.config.active_profile = self
+            .is_running()
+            .then(|| self.active_profile_name.clone())
+            .flatten();
         let _ = config::save(&self.config);
         if let Some(backend) = self.backend.as_mut() {
             let _ = backend.stop();

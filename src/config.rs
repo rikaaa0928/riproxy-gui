@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub profiles: Vec<Profile>,
     pub selected_profile: usize,
     #[serde(default)]
+    pub active_profile: Option<String>,
+    #[serde(default)]
     pub run_in_tray: bool,
     #[serde(default)]
     pub launch_at_login: bool,
@@ -40,6 +42,7 @@ impl Default for AppConfig {
                 auto_reload: true,
             }],
             selected_profile: 0,
+            active_profile: None,
             run_in_tray: false,
             launch_at_login: false,
         }
@@ -143,6 +146,10 @@ pub fn normalize_profiles(config: &mut AppConfig) {
         profile.name = unique_profile_name(&profile.name, &used);
         used.insert(profile.name.clone());
         profile.config_path = profile_config_path(&profile.name, profile.backend);
+    }
+    if let Some(active_profile) = config.active_profile.as_deref() {
+        let normalized = normalize_profile_name(active_profile);
+        config.active_profile = used.contains(&normalized).then_some(normalized);
     }
     if !config.profiles.is_empty() {
         config.selected_profile = config
