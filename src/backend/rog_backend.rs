@@ -46,8 +46,17 @@ impl ProxyBackend for RogBackend {
 
     fn start(&mut self, launch: BackendLaunch) -> Result<()> {
         self.cleanup_finished_thread();
-        if self.is_running() {
-            return Err(anyhow!("rog is already running"));
+        if let Some(thread) = self.thread.take() {
+            if self.shutdown.as_ref().is_some_and(|s| s.is_cancelled()) {
+                let _ = thread.join();
+                self.shutdown = None;
+            } else if !thread.is_finished() {
+                self.thread = Some(thread);
+                return Err(anyhow!("rog is already running"));
+            } else {
+                let _ = thread.join();
+                self.shutdown = None;
+            }
         }
 
         let config = rog::load_config_file(&launch.config_path)?;
@@ -67,6 +76,7 @@ impl ProxyBackend for RogBackend {
             {
                 Ok(runtime) => runtime,
                 Err(e) => {
+                    thread_shutdown.cancel();
                     let message = e.to_string();
                     let _ = tx.send(BackendEvent::Error(message.clone()));
                     let _ = tx.send(BackendEvent::Stopped {
@@ -79,8 +89,10 @@ impl ProxyBackend for RogBackend {
             let result = runtime.block_on(rog::run(rog::RunOptions {
                 config,
                 observe_registry: thread_registry,
-                shutdown: thread_shutdown,
+                shutdown: thread_shutdown.clone(),
             }));
+            drop(runtime);
+            thread_shutdown.cancel();
 
             match result {
                 Ok(()) => {
@@ -124,6 +136,16 @@ impl ProxyBackend for RogBackend {
 
     fn drain_events(&mut self) -> Vec<BackendEvent> {
         self.cleanup_finished_thread();
-        self.rx.try_iter().collect()
+        let events: Vec<_> = self.rx.try_iter().collect();
+        for event in &events {
+            if matches!(event, BackendEvent::Stopped { .. }) {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+                self.shutdown = None;
+                break;
+            }
+        }
+        events
     }
 }

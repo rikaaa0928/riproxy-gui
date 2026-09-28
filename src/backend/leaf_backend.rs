@@ -45,6 +45,9 @@ impl ProxyBackend for LeafBackend {
         if leaf::is_running(self.rt_id) {
             return Err(anyhow!("leaf is already running"));
         }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
 
         let config = launch.config_path.to_string_lossy().to_string();
         leaf::test_config(&config)?;
@@ -102,7 +105,16 @@ impl ProxyBackend for LeafBackend {
 
     fn drain_events(&mut self) -> Vec<BackendEvent> {
         self.cleanup_finished_thread();
-        self.rx.try_iter().collect()
+        let events: Vec<_> = self.rx.try_iter().collect();
+        for event in &events {
+            if matches!(event, BackendEvent::Stopped { .. }) {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+                break;
+            }
+        }
+        events
     }
 }
 
