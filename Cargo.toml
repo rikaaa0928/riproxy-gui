@@ -1,6 +1,6 @@
 [package]
 name = "riproxy-gui"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [features]
@@ -30,3 +30,8 @@ rog = { git = "https://github.com/rikaaa0928/rog.git", branch = "main", optional
 
 [target.'cfg(not(windows))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
+
+[patch.crates-io]
+h3 = { git = "https://github.com/hyperium/h3.git", rev = "14a14224242862de31e780a7907fe8839b893fd6" }
+h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "14a14224242862de31e780a7907fe8839b893fd6" }
+
